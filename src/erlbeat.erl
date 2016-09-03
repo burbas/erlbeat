@@ -13,8 +13,7 @@
 -export([start_link/0,
          register_service/1,
          unregister_service/1,
-         send_email/3,
-         send_text/3,
+         notify_contact/3,
          report/3
         ]).
 
@@ -25,7 +24,8 @@
 %% Declaration of types
 -type uri() :: pid() | binary().
 -type protocol() :: 'http' | 'erlang'.
-
+-type contact_type() :: 'sms' | 'email'.
+-type contact() :: {contact_type(), string()}.
 -record(state, {
           registration_table :: pid() | atom()
          }).
@@ -34,8 +34,7 @@
           protocol :: protocol(),
           uri :: uri(),
           worker_pid :: pid(),
-          user_email :: binary() | undefined,
-          user_mobile :: binary() | undefined
+          contact :: [contact()]
          }).
 
 
@@ -128,8 +127,7 @@ handle_call({register_service, Arguments}, _From, State =
                    protocol = proplists:get_value(protocol, Arguments),
                    uri = proplists:get_value(uri, Arguments),
                    worker_pid = Pid,
-                   user_email = proplists:get_value(user_email, Arguments),
-                   user_mobile = proplists:get_value(user_mobile, Arguments)
+                   contact = proplists:get_value(contact, Arguments)
                   },
             %% Save the registration in the ETS table
             ets:insert(RT, Registration),
@@ -170,11 +168,9 @@ handle_cast({new_report, service_down, URI}, State =
     %% Let's see if we can notify the person responsible for the URI somehow.
     case ets:lookup(RT, URI) of
         [#registration{
-            user_mobile = UserMobile,
-            user_email = UserEmail
+            contact = Contact
            }] ->
-            send_email(UserEmail, service_down, URI),
-            send_text(UserMobile, service_down, URI);
+            notify_contact(Contact, service_down, URI);
         _ ->
             %% We should report this as an internal error. This should not happen!
             error
@@ -243,13 +239,22 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-send_email(undefined, _, _) -> ok;
-send_email(_Email, _Type, _URI) ->
-    %% Do something useful with this?
-    ok.
+notify_contact([], _Type, _URI) ->
+    ok;
+notify_contact([{email, Email}|Rest], service_down, URI) ->
+    Username = application:get_env(erlbeat, email_username),
+    Password = application:get_env(erlbeat, email_password),
+    Relay = application:get_env(erlbeat, email_relay),
+    From = application:get_env(erlbeat, email_address),
+    FromName = application:get_env(erlbeat, email_name),
 
+    gen_smtp_client:send({From, [Email],
+                          "Subject: " ++ URI ++ " is down\r\n" ++
+                              "From: " ++ FromName ++ "\r\n\r\n" ++
+                              "Your service is down"}, [{relay, Relay},
+                                                        {username, Username},
+                                                        {password, Password}]),
+    notify_contact(Rest, service_down, URI);
 
-send_text(undefined, _, _) -> ok;
-send_text(_Mobile, _Type, _URI) ->
-    %% Implement me
-    ok.
+notify_contact([_Contact|Rest], Type, URI) ->
+    notify_contact(Rest, Type, URI).
