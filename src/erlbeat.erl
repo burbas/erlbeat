@@ -26,6 +26,7 @@
 -type protocol() :: 'http' | 'erlang'.
 -type contact_type() :: 'sms' | 'email'.
 -type contact() :: {contact_type(), string()}.
+
 -record(state, {
           registration_table :: pid() | atom()
          }).
@@ -37,6 +38,7 @@
           contact :: [contact()]
          }).
 
+-define(ETS_FILENAME, "priv/erlbeat.db").
 
 %%%===================================================================
 %%% API
@@ -99,8 +101,16 @@ report(Type, Pid, ServiceURI) when is_atom(Type),
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
+    RegistrationTable =
+        case filelib:is_file(?ETS_FILENAME) of
+            true ->
+                ets:file2tab(?ETS_FILENAME);
+            _ ->
+                ets:new(registration_table, [set, {keypos, 3}])
+        end,
+
     {ok, #state{
-            registration_table = ets:new(registration_table, [set, {keypos, 3}])
+            registration_table = RegistrationTable
            }}.
 
 %%--------------------------------------------------------------------
@@ -131,6 +141,8 @@ handle_call({register_service, Arguments}, _From, State =
                   },
             %% Save the registration in the ETS table
             ets:insert(RT, Registration),
+            %% Save ETS to disk
+            ets:tab2file(RT, ?ETS_FILENAME, [{sync, true}]),
             {reply, ok, State};
         _ ->
             %% The worker could not be started. Return an error to the caller
@@ -196,14 +208,16 @@ handle_info({'EXIT', FromPid, Reason}, State =
         [{URI, _UserEmail, _UserMobile}|_] ->
             %% We have found a object matching the FromPid. Extract the URI (Which is
             %% the key) and delete the same object.
+            ets:delete(RT, URI),
             case Reason of
                 'normal' ->
                     %% This is a normal shutdown so just ignore it
                     ok;
                 Reason ->
                     %% This might be a bug so we should be careful to log it.
-                    ets:delete(RT, URI)
-            end;
+                    ok
+            end,
+            ets:tab2file(RT, ?ETS_FILENAME, [{sync, true}]);
         _ ->
             ok
     end,
